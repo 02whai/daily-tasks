@@ -1,0 +1,53 @@
+{
+  "config": {
+    "wide_screen_mode": true,
+    "enable_forward": true
+  },
+  "header": {
+    "template": "blue",
+    "title": {
+      "tag": "plain_text",
+      "content": "每日情报 | {{date}}"
+    }
+  },
+  "elements": [
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "**扫描 {{total_sources}} 个信息源，去重后 {{total_items}} 条，精选 {{selected}} 条**\n关键词：{% for kw in tags %}#{{kw}} {% endfor %}"
+      }
+    },
+    {% if briefing %}
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "---\n📋 **今日简报**\n{{briefing}}"
+      }
+    },
+    {% endif %}
+    {
+      "tag": "hr"
+    },
+    {
+      "tag": "div",
+      "text": {
+        "tag": "lark_md",
+        "content": "{% for item in items %}{{item.emoji}} **〔{{item.source}}〕** [{{item.title}}]({{item.url}})\n{{item.summary}}\n{% if item.keywords %}{{item.keywords}}{% endif %}\n\n{% endfor %}"
+      }
+    },
+    {
+      "tag": "hr"
+    },
+    {
+      "tag": "note",
+      "elements": [
+        {
+          "tag": "plain_text",
+          "content": "自动采集 | {{total_sources}} 个信息源 | 去重后 {{total_items}} 条 | 精选 {{selected}} 条"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+sources:
+- name: 国务院-最新政策
+  type: json_api
+  url: https://www.gov.cn/zhengce/zuixin/ZUIXINZHENGCE.json
+  category: policy
+  field_map:
+    title: TITLE
+    url: URL
+    date: DOCRELPUBTIME
+    summary: SUB_TITLE
+    date_format: '%Y-%m-%d'
+- name: 国务院-政策解读
+  type: json_api
+  url: https://www.gov.cn/zhengce/jiedu/ZCJD_QZ.json
+  category: policy
+  field_map:
+    title: TITLE
+    url: URL
+    date: DOCRELPUBTIME
+    summary: SUB_TITLE
+    date_format: '%Y-%m-%d'
+- name: 商务部-政策发布
+  type: page
+  url: https://www.mofcom.gov.cn/zwgk/zcfb/index.html
+  category: policy
+  selectors:
+    item: ul.list li, div.conList li, li
+    title: a
+    link: a
+    date: span.date, em
+- name: 海关总署-海关法规
+  type: playwright
+  url: http://www.customs.gov.cn/customs/302249/302266/index.html
+  category: policy
+  playwright_js: "(() => {\n  const items = [];\n  document.querySelectorAll('a[href*=\"\
+    /customs/\"][href*=\"article_\"]').forEach(a => {\n    const text = a.textContent.trim();\n\
+    \    if (text.length > 5) {\n      const parent = a.parentElement;\n      let\
+    \ date = '';\n      if (parent) {\n        const nextEl = parent.querySelector('span,\
+    \ em, i');\n        if (nextEl) date = nextEl.textContent.trim();\n        else\
+    \ {\n          // fallback: last text node in parent\n          const nodes =\
+    \ parent.childNodes;\n          for (let i = nodes.length - 1; i >= 0; i--) {\n\
+    \            if (nodes[i].nodeType === 3 && nodes[i].textContent.trim()) {\n \
+    \             date = nodes[i].textContent.trim();\n              break;\n    \
+    \        }\n          }\n        }\n      }\n      items.push({title: text, url:\
+    \ a.href, date: date});\n    }\n  });\n  return items;\n})()\n"
+  lookback_hours: 720
+- name: 亿邦动力
+  type: playwright
+  url: https://www.ebrun.com/
+  category: industry
+  playwright_js: "(() => {\n  const items = [];\n  const seen = new Set();\n  document.querySelectorAll('a[href*=\"\
+    .shtml\"]').forEach(a => {\n    const text = a.textContent.trim();\n    const\
+    \ href = a.href;\n    if (text.length > 10 && !seen.has(href) && !href.includes('/tc/')\
+    \ && !href.includes('/ebs/')) {\n      seen.add(href);\n      let date = '';\n\
+    \      const parent = a.closest('li, div, article');\n      if (parent) {\n  \
+    \      const dateEl = parent.querySelector('[class*=\"time\"], time, .date');\n\
+    \        if (dateEl) date = dateEl.textContent.trim();\n      }\n      items.push({title:\
+    \ text, url: href, date: date});\n    }\n  });\n  return items;\n})()\n"
+- name: WTO-News
+  type: rss
+  url: http://www.wto.org/library/rss/latest_news_e.xml
+  category: global
+  lookback_hours: 48
+- name: USTR-贸易政策
+  type: page
+  url: https://ustr.gov/about-us/policy-offices/press-office/press-releases
+  category: policy
+  selectors:
+    item: a[href*='/press-releases/']
+    title: ''
+    link: ''
+    date: ''

@@ -1,0 +1,29 @@
+# === 飞书推送配置 ===
+# 密钥通过环境变量注入，此处仅保留非敏感配置
+feishu:
+  webhook_url: ""          # 环境变量 FEISHU_WEBHOOK_URL
+  webhook_secret: ""        # 环境变量 FEISHU_WEBHOOK_SECRET（可选）
+
+# === 采集配置 ===
+collector:
+  max_items_per_source: 8
+  lookback_hours: 24
+  min_score_to_push: 3
+  max_push_items: 10
+  dedup_retention_days: 30
+
+# === RSSHub 配置（暂未启用） ===
+rsshub:
+  base_url: "http://localhost:1200"
+
+# === LLM 简报生成 ===
+# 密钥通过环境变量注入
+llm:
+  api_key: ""               # 环境变量 LLM_API_KEY
+  base_url: ""              # 环境变量 LLM_BASE_URL
+  model: ""                 # 环境变量 LLM_MODEL
+
+# === 调度 ===
+schedule:
+  time: "08:30"
+  timezone: "Asia/Shanghai"
