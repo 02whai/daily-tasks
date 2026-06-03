@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from collector import (
+    _compile_keyword_patterns,
     _determine_run_mode,
     _mode_config,
     _rule_based_briefing,
@@ -265,3 +266,53 @@ def test_mode_config_monthly():
     assert mc["label"] == "月度精选"
     assert mc["lookback"] == 720
     assert mc["max_items"] == 10
+
+
+# ── 关键词词边界匹配 ──
+def test_keyword_boundary_prevents_false_match():
+    """AI 不应匹配 MAIL / RETAIL 中的子串"""
+    keywords = {"high_priority": ["AI"], "medium_priority": []}
+    assert score_item({"title": "AI赋能跨境电商", "category": "industry"}, keywords) == 3  # 真正的 AI
+    assert score_item({"title": "跨境电商发送MAIL通知", "category": "industry"}, keywords) == 0  # MAIL 不是 AI
+
+
+def test_keyword_boundary_saas():
+    keywords = {"high_priority": [], "medium_priority": ["SaaS"]}
+    assert score_item({"title": "SaaS企业出海", "category": "industry"}, keywords) == 1
+    assert score_item({"title": "PaaS平台", "category": "industry"}, keywords) == 0  # PaaS 不是 SaaS
+
+
+def test_chinese_keyword_still_in_match():
+    """中文关键词保持原有的 in 匹配方式"""
+    keywords = {"high_priority": ["出海"], "medium_priority": []}
+    assert score_item({"title": "企业出海", "category": "industry"}, keywords) == 3
+
+
+def test_compile_keyword_patterns():
+    keywords = {"high_priority": ["AI", "出海"], "medium_priority": ["SaaS"]}
+    patterns = _compile_keyword_patterns(keywords)
+    assert len(patterns) == 3
+    # AI 和 SaaS 应为编译后的正则，出海为字符串
+    types = {type(p[1]).__name__ for p in patterns}
+    assert "Pattern" in types
+    str_count = sum(1 for p in patterns if isinstance(p[1], str))
+    assert str_count == 1
+
+
+# ── 标题二级去重 ──
+def test_is_duplicate_with_title():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE IF NOT EXISTS seen_items (url_hash TEXT PRIMARY KEY, source TEXT NOT NULL, first_seen TEXT NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS seen_titles (title_hash TEXT PRIMARY KEY, first_seen TEXT NOT NULL)")
+    conn.commit()
+    url = "https://a.com/1"
+    title = "跨境电商新政发布"
+    # 先标记
+    from collector import mark_seen
+    mark_seen(conn, url, "test", title)
+    conn.commit()
+    # 同标题不同 URL 应被识别为重复
+    assert is_duplicate(conn, "https://b.com/mobile/1", title) is True
+    # 不同标题不同 URL 不应重复
+    assert is_duplicate(conn, "https://b.com/2", "完全不同的文章") is False
+    conn.close()

@@ -97,6 +97,8 @@ def init_db(path):
     conn = sqlite3.connect(path)
     conn.execute("""CREATE TABLE IF NOT EXISTS seen_items (
         url_hash TEXT PRIMARY KEY, source TEXT NOT NULL, first_seen TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS seen_titles (
+        title_hash TEXT PRIMARY KEY, first_seen TEXT NOT NULL)""")
     conn.commit()
     return conn
 
@@ -150,7 +152,7 @@ def clean_summary(text):
     return plain[:120] + "..." if len(plain) > 120 else plain
 
 # ── 采集分发 ──
-def fetch_from_source(src, config):
+def fetch_from_source(src, config, pw_context=None):
     src_type = src["type"]
     max_items = config["collector"]["max_items_per_source"]
     try:
@@ -161,7 +163,7 @@ def fetch_from_source(src, config):
         elif src_type == "json_api":
             return fetch_json_api(src, max_items)
         elif src_type == "playwright":
-            return fetch_playwright(src, max_items)
+            return fetch_playwright(src, max_items, pw_context)
         elif src_type == "page":
             return fetch_page(src, max_items)
         else:
@@ -208,52 +210,64 @@ def fetch_json_api(src, max_items):
             })
     return items
 
-def fetch_playwright(src, max_items):
+def fetch_playwright(src, max_items, pw_context=None):
     js_code = src.get("playwright_js", "")
     if not js_code:
         logging.error(f"[{src['name']}] No playwright_js"); return []
     items = []
-    timeout_ms = src.get("timeout_ms", 60000)  # 默认 60s（亿邦这种 JS 重的页面 30s 不够）
-    retries = src.get("retries", 2)  # 失败重试次数
-    for attempt in range(1, retries + 2):  # 1, 2, 3
+    timeout_ms = src.get("timeout_ms", 60000)
+    retries = src.get("retries", 2)
+    for attempt in range(1, retries + 2):
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-                )
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                    locale="zh-CN",
-                )
-                page = context.new_page()
-                page.set_extra_http_headers({
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                })
-                page.goto(src["url"], timeout=timeout_ms, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
-                rows = page.evaluate(js_code)
-                context.close(); browser.close()
-                for row in rows[:max_items]:
-                    pub_time = None
-                    date_str = row.get("date", "")
-                    if date_str:
-                        try:
-                            pub_time = datetime.strptime(date_str.strip(), "%Y-%m-%d").timetuple()
-                        except ValueError:
-                            pub_time = parse_cn_time(date_str)
-                    items.append({
-                        "title": row.get("title", "").strip(),
-                        "url": row.get("url", ""),
-                        "summary": row.get("summary", "") or "",
-                        "published": pub_time, "source": src["name"], "category": src["category"],
+            if pw_context:
+                # 复用外部传入的 browser context
+                page = pw_context.new_page()
+                try:
+                    page.goto(src["url"], timeout=timeout_ms, wait_until="domcontentloaded")
+                    page.wait_for_timeout(3000)
+                    rows = page.evaluate(js_code)
+                finally:
+                    page.close()
+            else:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                    )
+                    context = browser.new_context(
+                        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                        locale="zh-CN",
+                    )
+                    page = context.new_page()
+                    page.set_extra_http_headers({
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                     })
-            return items  # 成功就返回
+                    try:
+                        page.goto(src["url"], timeout=timeout_ms, wait_until="domcontentloaded")
+                        page.wait_for_timeout(3000)
+                        rows = page.evaluate(js_code)
+                    finally:
+                        context.close(); browser.close()
+            for row in rows[:max_items]:
+                pub_time = None
+                date_str = row.get("date", "")
+                if date_str:
+                    try:
+                        pub_time = datetime.strptime(date_str.strip(), "%Y-%m-%d").timetuple()
+                    except ValueError:
+                        pub_time = parse_cn_time(date_str)
+                items.append({
+                    "title": row.get("title", "").strip(),
+                    "url": row.get("url", ""),
+                    "summary": row.get("summary", "") or "",
+                    "published": pub_time, "source": src["name"], "category": src["category"],
+                })
+            return items
         except Exception as e:
             logging.warning(f"[{src['name']}] attempt {attempt}/{retries+1} failed: {e}")
             if attempt <= retries:
-                time.sleep(3)  # 重试前等 3s
+                time.sleep(3)
             else:
                 logging.error(f"[{src['name']}] all {retries+1} attempts failed: {e}")
                 return []
@@ -307,26 +321,60 @@ def fetch_page(src, max_items):
     return items
 
 # ── 去重 ──
-def is_duplicate(db, url):
-    url_hash = hashlib.sha256(url.encode()).hexdigest()
-    return db.execute("SELECT 1 FROM seen_items WHERE url_hash = ?", (url_hash,)).fetchone() is not None
+def _url_hash(url):
+    return hashlib.sha256(url.encode()).hexdigest()
 
-def mark_seen(db, url, source):
+def _title_hash(title):
+    return hashlib.sha256(title.encode()).hexdigest()
+
+def is_duplicate(db, url, title=""):
+    if db.execute("SELECT 1 FROM seen_items WHERE url_hash = ?", (_url_hash(url),)).fetchone():
+        return True
+    if title and db.execute("SELECT 1 FROM seen_titles WHERE title_hash = ?",
+                             (_title_hash(title),)).fetchone():
+        return True
+    return False
+
+def mark_seen(db, url, source, title=""):
     db.execute("INSERT OR IGNORE INTO seen_items VALUES (?, ?, ?)",
-               (hashlib.sha256(url.encode()).hexdigest(), source, datetime.now().isoformat()))
+               (_url_hash(url), source, datetime.now().isoformat()))
+    if title:
+        db.execute("INSERT OR IGNORE INTO seen_titles VALUES (?, ?)",
+                   (_title_hash(title), datetime.now().isoformat()))
 
 def cleanup_old_records(db, retention_days):
     db.execute("DELETE FROM seen_items WHERE first_seen < datetime('now', ?)",
-               (f"-{retention_days} days",)); db.commit()
+               (f"-{retention_days} days",))
+    db.execute("DELETE FROM seen_titles WHERE first_seen < datetime('now', ?)",
+               (f"-{retention_days} days",))
+    db.commit()
 
 # ── 打分 ──
-def score_item(item, keywords):
+def _compile_keyword_patterns(keywords):
+    """预编译关键词正则：ASCII 词用 \b 边界，中文词用直接匹配。"""
+    patterns = []
+    for priority, kws in [("high", keywords.get("high_priority", [])),
+                           ("medium", keywords.get("medium_priority", []))]:
+        for kw in kws:
+            if re.search(r'[a-zA-Z]', kw):
+                patterns.append((priority, re.compile(r'(?<![a-zA-Z])' + re.escape(kw) + r'(?![a-zA-Z])'), kw))
+            else:
+                patterns.append((priority, kw, kw))
+    return patterns
+
+def score_item(item, keywords, _compiled=None):
     score = 0; matched = []
     title = item.get("title", "")
-    for kw in keywords.get("high_priority", []):
-        if kw in title: score += 3; matched.append(kw)
-    for kw in keywords.get("medium_priority", []):
-        if kw in title: score += 1; matched.append(kw)
+    if _compiled is None:
+        _compiled = _compile_keyword_patterns(keywords)
+    weight = {"high": 3, "medium": 1}
+    for priority, pattern, kw in _compiled:
+        if isinstance(pattern, str):
+            if pattern in title:
+                score += weight[priority]; matched.append(kw)
+        else:
+            if pattern.search(title):
+                score += weight[priority]; matched.append(kw)
     if item.get("category") == "policy": score += 2
     item["_score"] = score; item["_matched_kws"] = matched
     return score
@@ -335,8 +383,8 @@ def emoji_for_category(cat):
     return {"policy": "🔴", "industry": "🟠", "global": "🟢"}.get(cat, "⚪")
 
 # ── LLM 简报 ──
-def generate_briefing(items, llm_config):
-    """调用 LLM 对精选条目生成每日简报"""
+def generate_briefing(items, llm_config, mode_label="每日情报"):
+    """调用 LLM 对精选条目生成简报"""
     if not llm_config.get("api_key"):
         return ""
     lines = []
@@ -347,8 +395,9 @@ def generate_briefing(items, llm_config):
         lines.append(f"{i}. [{item['source']}] {title}{kw_str}")
         if item.get("summary"):
             lines.append(f"   摘要: {item['summary'][:200]}")
+    time_word = {"每日情报": "今日", "每周精选": "本周", "月度精选": "本月"}.get(mode_label, "今日")
     prompt = (
-        f"以下是今日精选的 {len(items)} 条跨境贸易政策与行业动态。请直接输出一段中文每日简报（150-200字），"
+        f"以下是{time_word}精选的 {len(items)} 条跨境贸易政策与行业动态。请直接输出一段中文简报（150-200字），"
         f"突出最重要的2-3个要点。直接输出正文，不要加任何前缀或说明。\n\n"
         + "\n".join(lines)
     )
@@ -429,7 +478,7 @@ def build_card(items, config, keywords, briefing="", mode_label="每日情报"):
         total_sources=config.get("_total_sources", 0),
         total_items=config.get("_total_items", 0),
         selected=len(items), tags=["跨境电商", "出海", "AI", "贸易政策"],
-        briefing=json.dumps(briefing)[1:-1] if briefing else "",
+        briefing=json.dumps(briefing, ensure_ascii=False)[1:-1] if briefing else "",
     ))
 
 def send_to_feishu(feishu_cfg, card):
@@ -470,33 +519,46 @@ def main():
     mode = _determine_run_mode(today)
     mc = _mode_config(mode)
 
-    # 周/月模式覆盖回溯时间和推送上限
-    default_lookback = config["collector"]["lookback_hours"]
-    default_max_push = config["collector"]["max_push_items"]
+    # 周/月模式用局部变量覆盖，避免 config 字典副作用
+    eff_lookback = mc["lookback"] if mc["lookback"] else config["collector"]["lookback_hours"]
+    eff_max_push = mc["max_items"] if mc["max_items"] else config["collector"]["max_push_items"]
     if mode != "daily":
-        config["collector"]["lookback_hours"] = mc["lookback"]
-        config["collector"]["max_push_items"] = mc["max_items"]
-        print(f"[{mc['label']}模式] 回溯 {mc['lookback']}h, 最多推送 {mc['max_items']} 条")
+        print(f"[{mc['label']}模式] 回溯 {eff_lookback}h, 最多推送 {eff_max_push} 条")
+
+    # 有 playwright 源时复用同一个浏览器 context
+    has_pw = any(src.get("type") == "playwright" and src.get("enabled") is not False
+                 for src in sources["sources"])
+    pw_context = None
+    if has_pw:
+        browser = sync_playwright().start().chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
+        pw_context = browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            locale="zh-CN",
+        )
 
     all_items = []
-    for src in sources["sources"]:
-        if src.get("enabled") is False:
-            continue
-        if src["type"] == "rsshub" and not rsshub_ok:
-            continue
-        items = fetch_from_source(src, config)
-        lookback = src.get("lookback_hours", config["collector"]["lookback_hours"])
-        items = [it for it in items if is_within_lookback(it["published"], lookback)]
-        all_items.extend(items)
-        logging.info(f"[{src['name']}] {len(items)} items (filtered)")
-
-    # 恢复原值（避免副作用）
-    config["collector"]["lookback_hours"] = default_lookback
-    config["collector"]["max_push_items"] = default_max_push
+    try:
+        for src in sources["sources"]:
+            if src.get("enabled") is False:
+                continue
+            if src["type"] == "rsshub" and not rsshub_ok:
+                continue
+            items = fetch_from_source(src, config, pw_context)
+            lookback = src.get("lookback_hours", eff_lookback)
+            items = [it for it in items if is_within_lookback(it["published"], lookback)]
+            all_items.extend(items)
+            logging.info(f"[{src['name']}] {len(items)} items (filtered)")
+    finally:
+        if pw_context:
+            pw_context.close()
+            browser.close()
 
     if is_first_run:
         for item in all_items:
-            if item.get("url"): mark_seen(db, item["url"], item["source"])
+            if item.get("url"): mark_seen(db, item["url"], item["source"], item.get("title", ""))
         db.commit()
         print(f"[首次运行] 已入库 {len(all_items)} 条，明天开始推送")
         logging.info(f"First run: stored {len(all_items)} items")
@@ -505,27 +567,27 @@ def main():
     scored = []; deduped = 0
     for item in all_items:
         if not item.get("url"): continue
-        if is_duplicate(db, item["url"]): continue
+        if is_duplicate(db, item["url"], item.get("title", "")): continue
         deduped += 1
         s = score_item(item, keywords)
         if s >= config["collector"]["min_score_to_push"]:
             scored.append((s, item))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = [item for _, item in scored[:config["collector"]["max_push_items"]]]
+    top = [item for _, item in scored[:eff_max_push]]
 
     if not top:
         print("无新增高相关性内容，跳过推送")
         db.close(); return
 
-    briefing = generate_briefing(top, config.get("llm", {}))
+    briefing = generate_briefing(top, config.get("llm", {}), mc["label"])
     stats = {"_total_sources": len(sources["sources"]), "_total_items": deduped}
     card = build_card(top, {**config, **stats}, keywords, briefing, mode_label=mc["label"])
     result = send_to_feishu(config["feishu"], card)
     print(f"推送完成: {len(top)} 条, 响应: {result.get('code', 'ok')}")
     logging.info(f"Push done [{mode}]: {len(top)} items")
 
-    for item in top: mark_seen(db, item["url"], item["source"])
+    for item in top: mark_seen(db, item["url"], item["source"], item.get("title", ""))
     db.commit()
     cleanup_old_records(db, config["collector"]["dedup_retention_days"])
     db.close()
