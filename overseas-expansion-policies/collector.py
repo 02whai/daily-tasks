@@ -396,8 +396,25 @@ def _rule_based_briefing(items):
         parts.append(f"{src}：{'、'.join(titles[:2])}")
     return "；".join(parts[:4])
 
+# ── 运行模式 ──
+def _determine_run_mode(today):
+    """每月 1 号优先月度，其次周一为每周，其余为每日。"""
+    if today.day == 1:
+        return "monthly"
+    if today.weekday() == 0:
+        return "weekly"
+    return "daily"
+
+def _mode_config(mode):
+    if mode == "monthly":
+        return {"label": "月度精选", "lookback": 720, "max_items": 10}
+    elif mode == "weekly":
+        return {"label": "每周精选", "lookback": 168, "max_items": 5}
+    else:
+        return {"label": "每日情报", "lookback": None, "max_items": None}
+
 # ── 飞书卡片 ──
-def build_card(items, config, keywords, briefing=""):
+def build_card(items, config, keywords, briefing="", mode_label="每日情报"):
     with open(os.path.join(BASE_DIR, "templates", "feishu_card.json")) as f:
         template = Template(f.read())
     enriched = [{
@@ -406,8 +423,9 @@ def build_card(items, config, keywords, briefing=""):
         "summary": it["summary"],
         "keywords": " ".join(f"`{kw}`" for kw in it.get("_matched_kws", [])),
     } for it in items]
+    date_str = datetime.now().strftime("%Y-%m-%d")
     return json.loads(template.render(
-        date=datetime.now().strftime("%Y-%m-%d"), items=enriched,
+        date=f"{date_str}  {mode_label}", items=enriched,
         total_sources=config.get("_total_sources", 0),
         total_items=config.get("_total_items", 0),
         selected=len(items), tags=["跨境电商", "出海", "AI", "贸易政策"],
@@ -448,6 +466,18 @@ def main():
     is_first_run = not os.path.exists(db_path)
     db = init_db(db_path)
 
+    today = datetime.now().date()
+    mode = _determine_run_mode(today)
+    mc = _mode_config(mode)
+
+    # 周/月模式覆盖回溯时间和推送上限
+    default_lookback = config["collector"]["lookback_hours"]
+    default_max_push = config["collector"]["max_push_items"]
+    if mode != "daily":
+        config["collector"]["lookback_hours"] = mc["lookback"]
+        config["collector"]["max_push_items"] = mc["max_items"]
+        print(f"[{mc['label']}模式] 回溯 {mc['lookback']}h, 最多推送 {mc['max_items']} 条")
+
     all_items = []
     for src in sources["sources"]:
         if src.get("enabled") is False:
@@ -459,6 +489,10 @@ def main():
         items = [it for it in items if is_within_lookback(it["published"], lookback)]
         all_items.extend(items)
         logging.info(f"[{src['name']}] {len(items)} items (filtered)")
+
+    # 恢复原值（避免副作用）
+    config["collector"]["lookback_hours"] = default_lookback
+    config["collector"]["max_push_items"] = default_max_push
 
     if is_first_run:
         for item in all_items:
@@ -486,10 +520,10 @@ def main():
 
     briefing = generate_briefing(top, config.get("llm", {}))
     stats = {"_total_sources": len(sources["sources"]), "_total_items": deduped}
-    card = build_card(top, {**config, **stats}, keywords, briefing)
+    card = build_card(top, {**config, **stats}, keywords, briefing, mode_label=mc["label"])
     result = send_to_feishu(config["feishu"], card)
     print(f"推送完成: {len(top)} 条, 响应: {result.get('code', 'ok')}")
-    logging.info(f"Push done: {len(top)} items")
+    logging.info(f"Push done [{mode}]: {len(top)} items")
 
     for item in top: mark_seen(db, item["url"], item["source"])
     db.commit()

@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from collector import (
+    _determine_run_mode,
+    _mode_config,
     _rule_based_briefing,
     clean_summary,
     emoji_for_category,
@@ -218,3 +220,48 @@ def test_rule_based_briefing():
 
 def test_rule_based_briefing_empty():
     assert "共采集 0 条" in _rule_based_briefing([])
+
+
+# ── _determine_run_mode ──
+def test_determine_monthly_on_first():
+    assert _determine_run_mode(datetime(2026, 6, 1).date()) == "monthly"
+    assert _determine_run_mode(datetime(2026, 1, 1).date()) == "monthly"
+
+
+def test_determine_weekly_on_monday():
+    # 2026-06-08 is a Monday
+    assert _determine_run_mode(datetime(2026, 6, 8).date()) == "weekly"
+
+
+def test_determine_daily_on_normal_days():
+    # 2026-06-03 is a Wednesday
+    assert _determine_run_mode(datetime(2026, 6, 3).date()) == "daily"
+    assert _determine_run_mode(datetime(2026, 6, 5).date()) == "daily"  # Friday
+
+
+def test_determine_monthly_over_weekly():
+    """如果 1 号正好是周一，月度优先"""
+    # 2026-06-01 is a Monday
+    assert _determine_run_mode(datetime(2026, 6, 1).date()) == "monthly"
+
+
+# ── _mode_config ──
+def test_mode_config_daily():
+    mc = _mode_config("daily")
+    assert mc["label"] == "每日情报"
+    assert mc["lookback"] is None
+    assert mc["max_items"] is None
+
+
+def test_mode_config_weekly():
+    mc = _mode_config("weekly")
+    assert mc["label"] == "每周精选"
+    assert mc["lookback"] == 168
+    assert mc["max_items"] == 5
+
+
+def test_mode_config_monthly():
+    mc = _mode_config("monthly")
+    assert mc["label"] == "月度精选"
+    assert mc["lookback"] == 720
+    assert mc["max_items"] == 10

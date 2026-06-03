@@ -9,7 +9,7 @@ collector:
   max_items_per_source: 8
   lookback_hours: 24
   min_score_to_push: 3
-  max_push_items: 10
+  max_push_items: 5
   dedup_retention_days: 30
 
 # === RSSHub 配置（暂未启用） ===
